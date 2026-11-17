@@ -1,0 +1,120 @@
+name: Validate HILDA bundled CUA cleanup candidate
+
+on:
+  push:
+    branches: [fix/bundled-cua-dormant-cleanup]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hilda-bundled-cua-cleanup
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_TAG: rust-v0.169.0
+  UPSTREAM_FIX_COMMIT: 8afe928a76fd9013a0127edae5ed2de7508036e2
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  linux-regression:
+    name: Linux / Rust regression tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check public-source-only repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e auth.json
+          test ! -e config.toml
+          test ! -d .codex
+          test ! -d HILDA-Projects
+          python3 -m py_compile scripts/extend_bundled_cleanup.py
+      - name: Fetch pinned upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --branch "$UPSTREAM_TAG" https://github.com/openai/codex.git upstream
+          git -C upstream fetch --no-tags --depth=2 origin "$UPSTREAM_FIX_COMMIT"
+          git -C upstream cherry-pick --no-commit "$UPSTREAM_FIX_COMMIT"
+          python3 scripts/extend_bundled_cleanup.py upstream
+          git -C upstream diff --check
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Validate formatting and candidate scope
+        shell: bash
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --check codex-rs/codex-mcp/src/connection_manager.rs codex-rs/codex-mcp/src/connection_manager_tests.rs
+          git diff --stat
+      - name: Verify private/dormant bundled REPL boundary
+        shell: bash
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          RUST_MIN_STACK=16777216 cargo test --locked -p codex-mcp cleanup_skips_only_an_unrequested_private_local_stdio_connection -- --nocapture
+          RUST_MIN_STACK=16777216 cargo test --locked -p codex-mcp bundled_cua_cleanup_skips_only_private_dormant_local_stdio -- --nocapture
+      - name: Verify bundled Hook integration behavior
+        shell: bash
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          RUST_MIN_STACK=16777216 cargo test --locked -p codex-core --test all mcp_tool_hook_starts_cached_model_hidden_tools -- --nocapture
+
+  macos-intel:
+    name: macOS Intel candidate build
+    needs: linux-regression
+    runs-on: macos-15-intel
+    timeout-minutes: 70
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_STRIP: "symbols"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch pinned upstream and apply source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --branch "$UPSTREAM_TAG" https://github.com/openai/codex.git upstream
+          git -C upstream fetch --no-tags --depth=2 origin "$UPSTREAM_FIX_COMMIT"
+          git -C upstream cherry-pick --no-commit "$UPSTREAM_FIX_COMMIT"
+          python3 scripts/extend_bundled_cleanup.py upstream
+          git -C upstream diff --check
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build pinned patched Codex for Intel Mac
+        shell: bash
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p codex-cli --bin codex --target x86_64-apple-darwin
+          file target/x86_64-apple-darwin/release/codex
+          shasum -a 256 target/x86_64-apple-darwin/release/codex | tee "$GITHUB_WORKSPACE/candidate-sha256.txt"
+      - name: Package only the CLI binary and hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cp upstream/codex-rs/target/x86_64-apple-darwin/release/codex artifact/codex
+          cp candidate-sha256.txt artifact/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-0.169.0-hilda-cua-candidate-macos-intel
+          path: artifact/
+          retention-days: 7
+          if-no-files-found: error
