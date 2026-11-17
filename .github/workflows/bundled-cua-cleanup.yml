@@ -48,6 +48,7 @@ jobs:
           # Resolve only conflicting overlapping upstream hunks in favor of the audited PR.
           # Strict source anchors plus real tests below must then validate the result.
           python3 scripts/extend_bundled_cleanup.py upstream
+          python3 scripts/normalize_workspace_lock.py upstream/codex-rs
           git -C upstream diff --check
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -98,6 +99,7 @@ jobs:
           # Resolve only conflicting overlapping upstream hunks in favor of the audited PR.
           # Strict source anchors plus real tests below must then validate the result.
           python3 scripts/extend_bundled_cleanup.py upstream
+          python3 scripts/normalize_workspace_lock.py upstream/codex-rs
           git -C upstream diff --check
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
