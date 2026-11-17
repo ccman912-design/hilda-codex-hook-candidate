@@ -57,6 +57,7 @@ jobs:
         working-directory: upstream
         run: |
           set -euo pipefail
+          rustfmt --edition 2024 codex-rs/codex-mcp/src/connection_manager.rs codex-rs/codex-mcp/src/connection_manager_tests.rs
           rustfmt --edition 2024 --check codex-rs/codex-mcp/src/connection_manager.rs codex-rs/codex-mcp/src/connection_manager_tests.rs
           git diff --stat
       - name: Verify private/dormant bundled REPL boundary
