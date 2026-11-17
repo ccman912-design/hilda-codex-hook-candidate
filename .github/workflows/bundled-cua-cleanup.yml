@@ -44,7 +44,9 @@ jobs:
           set -euo pipefail
           git clone --depth=1 --single-branch --branch "$UPSTREAM_TAG" https://github.com/openai/codex.git upstream
           git -C upstream fetch --no-tags --depth=2 origin "$UPSTREAM_FIX_COMMIT"
-          git -C upstream cherry-pick --no-commit "$UPSTREAM_FIX_COMMIT"
+          git -C upstream cherry-pick --no-commit -X theirs "$UPSTREAM_FIX_COMMIT"
+          # Resolve only conflicting overlapping upstream hunks in favor of the audited PR.
+          # Strict source anchors plus real tests below must then validate the result.
           python3 scripts/extend_bundled_cleanup.py upstream
           git -C upstream diff --check
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -91,7 +93,9 @@ jobs:
           set -euo pipefail
           git clone --depth=1 --single-branch --branch "$UPSTREAM_TAG" https://github.com/openai/codex.git upstream
           git -C upstream fetch --no-tags --depth=2 origin "$UPSTREAM_FIX_COMMIT"
-          git -C upstream cherry-pick --no-commit "$UPSTREAM_FIX_COMMIT"
+          git -C upstream cherry-pick --no-commit -X theirs "$UPSTREAM_FIX_COMMIT"
+          # Resolve only conflicting overlapping upstream hunks in favor of the audited PR.
+          # Strict source anchors plus real tests below must then validate the result.
           python3 scripts/extend_bundled_cleanup.py upstream
           git -C upstream diff --check
       - uses: dtolnay/rust-toolchain@1.95.0
