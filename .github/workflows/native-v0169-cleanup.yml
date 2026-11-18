@@ -1,0 +1,145 @@
+name: Codex 0.169 native bundled cleanup (isolated)
+
+on:
+  push:
+    branches: [fix/v0169-native-cleanup]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hilda-native-v0169
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "16777216"
+  UPSTREAM_TAG: "rust-v0.169.0"
+  # OpenAI uses the system Git transport for nested rusty_v8 dependencies.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  linux-tests:
+    name: 0.169 Linux compile and regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate scripts and public-only inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/patch_native_cleanup.py scripts/normalize_workspace_lock.py
+          test ! -f auth.json
+          test ! -f config.toml
+          test ! -d .codex
+          test ! -d HILDA-Projects
+      - name: Pin Codex version and apply only version-native patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --branch "$UPSTREAM_TAG" https://github.com/openai/codex.git upstream
+          test "$(git -C upstream describe --tags --exact-match)" = "$UPSTREAM_TAG"
+          python3 scripts/patch_native_cleanup.py upstream
+          python3 scripts/normalize_workspace_lock.py upstream/codex-rs
+          git -C upstream diff --check
+          git -C upstream diff --stat
+          echo "PINNED_COMMIT=$(git -C upstream rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Format generated source and verify strict scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 upstream/codex-rs/hooks/src/mcp.rs \
+            upstream/codex-rs/hooks/src/engine/mcp_runner.rs \
+            upstream/codex-rs/hooks/src/engine/mod_tests.rs \
+            upstream/codex-rs/hooks/src/engine/mcp_runner_tests.rs \
+            upstream/codex-rs/core/src/hook_mcp_executor.rs \
+            upstream/codex-rs/codex-mcp/src/connection_manager.rs \
+            upstream/codex-rs/codex-mcp/src/runtime.rs \
+            upstream/codex-rs/codex-mcp/src/connection_manager_tests.rs
+          git -C upstream diff --check
+          test "$(git -C upstream diff --name-only | grep -Ev '^(codex-rs/(hooks/src/(mcp.rs|engine/(mcp_runner.rs|mod_tests.rs|mcp_runner_tests.rs))|core/src/hook_mcp_executor.rs|codex-mcp/src/(connection_manager.rs|connection_manager_tests.rs|runtime.rs)|Cargo.lock))$' | wc -l | tr -d ' ')" = "0"
+      - name: Compile and run native connection-safety tests
+        shell: bash
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          df -h .
+          cargo test --locked -p codex-mcp bundled_plugin_cleanup_is_source_and_connection_bounded -- --nocapture
+          cargo test --locked -p codex-mcp bundled_browser_cleanup_never_admits_unknown_plugin -- --nocapture
+      - name: Run Hook dispatch regression tests
+        shell: bash
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          cargo test --locked -p codex-hooks executor_stop_hooks -- --nocapture
+          cargo test --locked -p codex-hooks mcp_tool_results -- --nocapture
+      - name: Capture first-stage result
+        if: always()
+        shell: bash
+        run: |
+          echo "Fixed tag: $UPSTREAM_TAG"
+          echo "Patch input checksum:"
+          sha256sum scripts/patch_native_cleanup.py
+
+  macos-intel-candidate:
+    name: macOS Intel candidate build (after Linux tests)
+    needs: linux-tests
+    runs-on: macos-15-intel
+    timeout-minutes: 200
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_STRIP: "symbols"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "32"
+      # Faster build for isolated acceptance; this is not yet a production release.
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Apply exactly the same pinned source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --branch "$UPSTREAM_TAG" https://github.com/openai/codex.git upstream
+          test "$(git -C upstream describe --tags --exact-match)" = "$UPSTREAM_TAG"
+          python3 scripts/patch_native_cleanup.py upstream
+          python3 scripts/normalize_workspace_lock.py upstream/codex-rs
+          git -C upstream diff --check
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build standalone macOS Intel CLI
+        shell: bash
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          df -h .
+          cargo build --locked --release -p codex-cli --bin codex --target x86_64-apple-darwin
+          df -h .
+          file target/x86_64-apple-darwin/release/codex
+          shasum -a 256 target/x86_64-apple-darwin/release/codex
+      - name: Package only candidate and its checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cp upstream/codex-rs/target/x86_64-apple-darwin/release/codex artifact/codex
+          shasum -a 256 artifact/codex > artifact/SHA256.txt
+          printf 'PINNED_TAG=%s\nGITHUB_SHA=%s\n' "$UPSTREAM_TAG" "$GITHUB_SHA" > artifact/BUILD-INFO.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-0.169-hilda-native-cleanup-macos-intel
+          path: artifact/
+          retention-days: 7
+          if-no-files-found: error
