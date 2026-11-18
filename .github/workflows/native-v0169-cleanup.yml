@@ -19,6 +19,8 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   RUST_MIN_STACK: "16777216"
   UPSTREAM_TAG: "rust-v0.169.0"
+  # OpenAI uses the system Git transport for nested rusty_v8 dependencies.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   linux-tests:
@@ -93,12 +95,14 @@ jobs:
     name: macOS Intel candidate build (after Linux tests)
     needs: linux-tests
     runs-on: macos-15-intel
-    timeout-minutes: 70
+    timeout-minutes: 200
     env:
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_PROFILE_RELEASE_STRIP: "symbols"
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "32"
+      # Faster build for isolated acceptance; this is not yet a production release.
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,6 +126,7 @@ jobs:
           set -euo pipefail
           df -h .
           cargo build --locked --release -p codex-cli --bin codex --target x86_64-apple-darwin
+          df -h .
           file target/x86_64-apple-darwin/release/codex
           shasum -a 256 target/x86_64-apple-darwin/release/codex
       - name: Package only candidate and its checksum
